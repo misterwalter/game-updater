@@ -83,8 +83,8 @@ def main():
     
     proj = root / "project.godot"
     content = proj.read_text()
-    content = re.sub(r'(application/config/version\s*=\s*)"[^"]*"', r'\1"' + version + '"', content)
-    if 'application/config/version' not in content: content += f'\napplication/config/version = "{version}"\n'
+    content = re.sub(r'(config/version\s*=\s*)"[^"]*"', r'\1"' + version + '"', content)
+    if 'config/version' not in content: content += f'\nconfig/version = "{version}"\n'
     proj.write_text(content)
 
     export_paths = get_export_paths(root)
