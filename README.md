@@ -11,7 +11,7 @@ Upload games to:
 4. Drown in that sweet sweet indie game dev money. 🤑🤑🤑🤑
 
 ## Dependencies
-Latest version is best, but whatever verion you have is probably fine.
+Latest version is best, but whatever version you have is probably fine. There's nothing crazy here.
 1. Python3
 2. butler, to upload to itch.io
 3. steamCMD
