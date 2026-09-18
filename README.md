@@ -5,10 +5,11 @@ Upload Godot games to:
 - [Itch.io](https://itch.io/)
 
 ## How To
-1. Replace the default steam account name in the script with your steam username.
-2. `alias gu="python ~/code/game-updater/game-updater.py"` in the old .bashrc makes life _even_ easier.
-3. Navigate to the godot project folder and run `gu` once. It'll fill you in on what it needs, and once you do that, you can run it again and it'll probably work!
-4. Drown in that sweet sweet indie game dev money. 🤑🤑🤑🤑
+1. `alias gu="python ~/code/game-updater/game-updater.py"` in the old .bashrc makes life _even_ easier.
+2. Navigate to the godot project folder and run `gu` once. It'll create a `game_config.json` for you to fill in (your steam username goes in there as `steam_username`), and once you do that, you can run it again and it'll probably work!
+3. Drown in that sweet sweet indie game dev money. 🤑🤑🤑🤑
+
+Only on one store? Delete that platform's keys from `game_config.json`, or prefix them with `_` (e.g. `_itch_username`) to park them for later. The plan shown before the pause tells you exactly which platforms will and won't be updated, and why.
 
 ## Dependencies
 Latest version is best, but whatever version you have is probably fine. There's nothing crazy here.
