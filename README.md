@@ -6,10 +6,11 @@ Upload Godot games to:
 
 ## How To
 1. `alias gu="python ~/code/game-updater/game-updater.py"` in the old .bashrc makes life _even_ easier.
-2. Navigate to the godot project folder and run `gu` once. It'll create a `game_config.json` for you to fill in (your steam username goes in there as `steam_username`), and once you do that, you can run it again and it'll probably work!
+2. Navigate to the godot project folder and run `gu` once. It'll create a `game_config.json` for you to fill in, and once you do that, you can run it again and it'll probably work!
 3. Drown in that sweet sweet indie game dev money. 🤑🤑🤑🤑
 
 Only on one store? Delete that platform's keys from `game_config.json`, or prefix them with `_` (e.g. `_itch_username`) to park them for later. The plan shown before the pause tells you exactly which platforms will and won't be updated, and why.
+
 
 ## Dependencies
 Latest version is best, but whatever version you have is probably fine. There's nothing crazy here.
@@ -17,10 +18,19 @@ Latest version is best, but whatever version you have is probably fine. There's 
 2. butler, to upload to itch.io
 3. steamCMD
 
-## Outro
-Lumo did a lot here, but so did I. Let's call it a collaboration? The future is weird.
-Additionally, almost zero effort has been expended on making this run on a variety of setups, as I am a busy person and I don't expect others to find this directly useful. I do recommend that you take a look if you want to learn though! Just be careful with the .vdf files, they are surprisingly finicky. Don't expect it to work right out of the box, but if you try it let me know! I'd be happy to do a little tech support just to learn how others do things.
-
 Future platforms (gog.com, epic, etc) may come online with time, once I expand to those stores as well.
 
-## License is public domain, but attribution is appreciated. I'm just not going to act like it makes any sense for me to chase you down if you don't.
+## Steam demos
+
+Got a demo app on Steam? Add `steam_demo_app_id` plus `steam_demo_windows_depot_id` / `steam_demo_linux_depot_id` to `game_config.json`. Then in Godot (Project > Export) duplicate your `Windows` and `Linux` presets as `Windows Demo` and `Linux Demo`, and give each one:
+
+- its own export path in its own folder (e.g. `builds/demo/windows/...`), because Steam uploads the whole folder
+- an exclude filter listing what the demo must not contain, e.g. `towns/latergame/*, scenes/secret_boss.tscn`. Folders need the trailing `/*` or Godot silently ignores them
+- the custom feature `demo`, so the game can check `OS.has_feature("demo")`
+
+Files left out this way aren't in the demo at all, so they can't be datamined. Everything that *does* ship can be, including the names of anything a shipped scene or script still points at, so the plan lists those for you to clean up. After building, the demo's PCK is opened and checked; if anything withheld is in there, or the demo folder has stray files in it, nothing gets uploaded anywhere.
+
+`--demo-only` and `--no-demo` do what they say.
+
+
+This script is unapologetically vibe coded and you should steal it. Our time is better spent elsewhere!
