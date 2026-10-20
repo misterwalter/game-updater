@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Game Updater: Build & Deploy for Godot 4.
-Supports Itch.io and Steam, plus a cut-down Steam demo.
+Game Updater: Build & Deploy for Godot 4, from Linux or Windows.
+Supports Itch.io and Steam, plus a cut-down demo (on Steam, or on the same itch page),
+and packages the full game for Patreon and SubscribeStar.
 """
 
-import os, sys, json, subprocess, shutil, re, struct, time, argparse
+import os, sys, json, subprocess, shutil, re, struct, time, argparse, shlex, webbrowser
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -15,24 +16,31 @@ GODOT_ID = "org.godotengine.Godot"
 PRESETS = ["Windows", "Linux"]
 DEMO_PRESETS = {p: f"{p} Demo" for p in PRESETS}  # export presets the demo is built from
 VERSION_FMT = "%Y.%m.%d.%H"
-STEAMCMD_PATH = str(Path.home() / ".steam" / "steamcmd" / "steamcmd.sh")
 TEMPLATE = {
     "itch_username": "USER", "itch_project_slug": "SLUG",
     "steam_username": "STEAM_USER", "steam_app_id": "APP", "steam_windows_depot_id": "WIN_DEPOT", "steam_linux_depot_id": "LNX_DEPOT",
     "steam_demo_app_id": "DEMO_APP", "steam_demo_windows_depot_id": "DEMO_WIN_DEPOT", "steam_demo_linux_depot_id": "DEMO_LNX_DEPOT",
 }
+# Optional keys: not in the template a new project gets, read when present (see the README).
+OPTIONAL = ["godot_path", "steamcmd_path", "pre_export", "itch_demo", "patreon_post_url", "subscribestar_post_url", "release_name"]
 TEXT_EXTS = (".tscn", ".tres", ".gd", ".gdshader", ".gdshaderinc", ".cfg", ".json", ".godot")
+WINDOWS = os.name == "nt"
+DEMO_TARGETS = ("Steam Demo", "Itch Demo")
+ITCH_CHANNELS = {"Windows": "windows", "Linux": "linux", "Windows Demo": "windows-demo", "Linux Demo": "linux-demo"}
 
 def cfg_value(cfg, key):
-    """Usable value for key, or None if it is missing, empty, or still the template placeholder."""
-    val = str(cfg.get(key) or "").strip()
-    return None if not val or val == TEMPLATE[key] else val
+    """Usable value for key, or None if it is missing, empty, or still the template placeholder. A value given per
+    OS ({"windows": ..., "linux": ...}) is this OS's."""
+    val = cfg.get(key)
+    if isinstance(val, dict): val = val.get("windows" if WINDOWS else "linux")
+    val = str(val or "").strip()
+    return None if not val or val == TEMPLATE.get(key) else val
 
 def describe_unset(cfg, keys):
     """Human-readable reason why each of the given keys has no usable value."""
     notes = []
     for k in keys:
-        if k in cfg: notes.append(f"'{k}' is " + ("still the template placeholder" if str(cfg[k]).strip() == TEMPLATE[k] else "empty"))
+        if k in cfg: notes.append(f"'{k}' is " + ("still the template placeholder" if str(cfg[k]).strip() == TEMPLATE.get(k) else "empty"))
         elif "_" + k in cfg: notes.append(f"'{k}' is disabled (found '_{k}')")
         else: notes.append(f"'{k}' is missing")
     return ", ".join(notes)
@@ -66,7 +74,30 @@ def resolve_targets(cfg):
         # A game with no demo keys at all simply has no demo; that's not worth a warning
         elif name == "Steam" or any(k.lstrip("_").startswith(prefix) for k in cfg): skipped[name] = steam
 
+    # The demo on the same itch page as the full game, on channels of its own
+    if "Itch" in targets and cfg.get("itch_demo"): targets["Itch Demo"] = {"target": targets["Itch"]["target"]}
+
+    # Patreon and SubscribeStar take the full game as zips, posted by hand: neither has an API to upload with
+    for name, key in [("Patreon", "patreon_post_url"), ("SubscribeStar", "subscribestar_post_url")]:
+        if cfg_value(cfg, key): targets[name] = {"url": cfg_value(cfg, key)}
+        elif any(k.lstrip("_") == key for k in cfg): skipped[name] = describe_unset(cfg, [key])
+
     return targets, skipped
+
+def godot_command(cfg):
+    """How to run Godot here: godot_path, else $GODOT, else flatpak on Linux, else godot on PATH. None if none."""
+    path = cfg_value(cfg, "godot_path") or os.environ.get("GODOT")
+    if path: return [path]
+    if not WINDOWS and shutil.which("flatpak"): return ["flatpak", "run", GODOT_ID]
+    for name in ["godot", "godot4"]:
+        if shutil.which(name): return [shutil.which(name)]
+    return None
+
+def steamcmd_path(cfg):
+    path = cfg_value(cfg, "steamcmd_path")
+    if path: return path
+    if WINDOWS: return shutil.which("steamcmd") or r"C:\steamcmd\steamcmd.exe"
+    return str(Path.home() / ".steam" / "steamcmd" / "steamcmd.sh")
 
 def run(cmd, interactive=False):
     print(f"> {(' ').join(cmd)}")
@@ -74,6 +105,22 @@ def run(cmd, interactive=False):
         subprocess.run(cmd, check=True, stdin=None if not interactive else None)
     except subprocess.CalledProcessError as e:
         print(f"ERROR: {e}"); sys.exit(1)
+
+def run_pre_export(cfg, godot_cmd, root):
+    """The project's own step before anything is read (bbd writes its export presets' filters here)."""
+    cmd = cfg.get("pre_export")
+    if not cmd: return
+    parts = cmd if isinstance(cmd, list) else shlex.split(cmd, posix=not WINDOWS)
+    full = []
+    for part in parts:
+        if part == "{godot}":
+            if not godot_cmd: print("ERROR: pre_export uses {godot} but Godot wasn't found (set godot_path)."); sys.exit(1)
+            full += godot_cmd
+        else: full.append(part)
+    print("\n--- PRE-EXPORT ---")
+    print(f"> {' '.join(full)}")
+    if subprocess.run(full, cwd=root).returncode != 0:
+        print("ERROR: pre_export failed (above), so nothing was built or uploaded."); sys.exit(1)
 
 def read_presets(root):
     """Export presets from export_presets.cfg as {name: {setting: value}}."""
@@ -125,26 +172,28 @@ def find_dangling_refs(root, files, withheld):
 
     dangling = {}
     for f in files:
-        if f in withheld or not f.endswith(TEXT_EXTS): continue
+        if f in withheld or f == LOCAL_CFG or not f.endswith(TEXT_EXTS): continue  # our own config is never exported
         text = (root / f).read_text(errors="ignore")
         hits = {r.removeprefix("res://") for r in re.findall(r'res://[^"\'\s\])]+', text)} & withheld
         hits |= {uids[u] for u in re.findall(r'uid://\w+', text) if u in uids}
         if hits: dangling[f] = sorted(hits)
     return dangling
 
-def check_demo(root, presets, demo_names, export_paths, files):
-    """Pre-flight for the demo. Returns (errors, withheld) where withheld maps preset -> set of files it keeps out of the demo."""
+def check_withheld(root, presets, names, demo_names, export_paths, files):
+    """Pre-flight for every build that leaves files out (a demo always must). Returns (errors, withheld) where withheld
+    maps preset -> set of files it keeps out of its build."""
     errors, withheld = [], {}
-    for name in demo_names:
+    for name in names:
         preset = presets.get(name)
-        if not preset or not preset.get("export_path"):
+        if name in demo_names and (not preset or not preset.get("export_path")):
             base = name.removesuffix(" Demo")
             errors.append(f"No export preset named '{name}'. In Godot: Project > Export, duplicate '{base}', name it '{name}', give it its own "
                           f"export path (e.g. builds/demo/{base.lower()}/...), an exclude filter, and the custom feature 'demo'.")
             continue
-        patterns = [p.strip() for p in preset.get("exclude_filter", "").split(",") if p.strip()]
+        patterns = [p.strip() for p in (preset or {}).get("exclude_filter", "").split(",") if p.strip()]
         if not patterns:
-            errors.append(f"Preset '{name}' has an empty exclude filter, so it would upload the FULL game to the demo app."); continue
+            if name in demo_names: errors.append(f"Preset '{name}' has an empty exclude filter, so it would upload the FULL game as the demo.")
+            continue
         withheld[name] = set()
         for pattern in patterns:
             matched = {f for f in files if filter_regex(pattern).fullmatch(f)}
@@ -153,13 +202,13 @@ def check_demo(root, presets, demo_names, export_paths, files):
                 errors.append(f"Preset '{name}': exclude filter '{pattern}' matches no files, so Godot would silently ignore it.{hint}")
             withheld[name] |= matched
 
-    # Steam uploads a build's whole folder, so a demo must never share (or sit inside) another build's folder
+    # Steam and itch upload a build's whole folder, so a demo must never share (or sit inside) another build's folder
     folders = {name: Path(p).parent for name, p in export_paths.items()}
     for a, b in combinations(folders, 2):
         if not (a in demo_names or b in demo_names): continue
         if folders[a] == folders[b] or folders[a] in folders[b].parents or folders[b] in folders[a].parents:
-            errors.append(f"'{a}' and '{b}' export into overlapping folders ({folders[a]} / {folders[b]}). Steam uploads the whole "
-                          f"folder, so one build would be uploaded inside the other. Give each preset its own folder.")
+            errors.append(f"'{a}' and '{b}' export into overlapping folders ({folders[a]} / {folders[b]}). The whole folder is "
+                          f"uploaded, so one build would be uploaded inside the other. Give each preset its own folder.")
     return errors, withheld
 
 def read_pck_paths(export_path):
@@ -184,12 +233,15 @@ def read_pck_paths(export_path):
     if "project.binary" not in paths: raise ValueError(f"unrecognised PCK layout (format v{version})")
     return paths
 
-def verify_demo_build(name, export_path, withheld, build_start):
-    """Post-build gate: returns a list of reasons this demo build must not be uploaded."""
+def verify_build(name, export_path, withheld, build_start):
+    """Post-build gate: returns a list of reasons this build must not be uploaded."""
     problems = []
     folder = Path(export_path).parent
     stale = sorted(f.relative_to(folder).as_posix() for f in folder.rglob("*") if f.is_file() and f.stat().st_mtime < build_start)
-    if stale: problems.append(f"{folder} contains files this build didn't produce, which Steam would upload too: {', '.join(stale)}")
+    if stale: problems.append(f"{folder} contains files this build didn't produce, which would be uploaded too: {', '.join(stale)}")
+    if not withheld:
+        if not problems: print(f"  -> {name}: OK (it withholds nothing to check for).")
+        return problems
 
     try:
         shipped = {re.sub(r'\.(remap|import)$', '', p) for p in read_pck_paths(export_path)}
@@ -202,9 +254,35 @@ def verify_demo_build(name, export_path, withheld, build_start):
 
 # --- Deploy ---
 
-def deploy_steam(label, steam, export_paths, root):
+def package_zips(cfg, root, version, export_paths):
+    """The full game's builds as zips in builds/release/, for posting by hand. Returns their paths."""
+    name = cfg_value(cfg, "release_name")
+    if not name:
+        found = re.search(r'config/name\s*=\s*"([^"]*)"', (root / "project.godot").read_text())
+        name = found.group(1) if found else root.name
+    name = re.sub(r'[^\w.-]+', "-", name).strip("-")
+    out_dir = root / "builds" / "release"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    zips = []
+    for preset in PRESETS:
+        if preset not in export_paths or not Path(export_paths[preset]).exists(): continue
+        base = out_dir / f"{name}-{version}-{preset.lower()}"
+        print(f"Zipping {preset} -> {base}.zip")
+        zips.append(Path(shutil.make_archive(str(base), "zip", root_dir=Path(export_paths[preset]).parent)))
+    return zips
+
+def deploy_by_hand(label, url, zips):
+    print(f"\n--- {label.upper()}: POST BY HAND ---")
+    print(f"{label} has no API to upload with. Attach these to a new post:")
+    for z in zips: print(f"  -> {z} ({z.stat().st_size / 1e6:.0f} MB)")
+    try:
+        webbrowser.open(url); print(f"Opened: {url}")
+    except Exception as e:
+        print(f"Could not open a browser ({e}). Go to: {url}")
+
+def deploy_steam(label, steam, export_paths, root, steamcmd):
     print(f"\n--- DEPLOYING TO {label.upper()} ---")
-    os.chmod(STEAMCMD_PATH, 0o755)
+    if not WINDOWS: os.chmod(steamcmd, 0o755)
 
     for preset, reason in steam["skipped_depots"].items():
         print(f"Skipping {preset} depot ({reason}).")
@@ -214,9 +292,10 @@ def deploy_steam(label, steam, export_paths, root):
         folder = Path(export_paths[preset]).parent
         if not folder.exists():
             print(f"Error: Folder {folder} not found."); continue
-        os.chmod(folder, 0o755)
-        for item in folder.iterdir():
-            if item.is_file(): os.chmod(item, 0o755)
+        if not WINDOWS:
+            os.chmod(folder, 0o755)
+            for item in folder.iterdir():
+                if item.is_file(): os.chmod(item, 0o755)
 
         vdf_path = root / f"steam_build_{os_name}.vdf"
         rel_folder = folder.relative_to(root).as_posix() if folder.is_relative_to(root) else folder.as_posix()
@@ -244,14 +323,14 @@ def deploy_steam(label, steam, export_paths, root):
         print(f"Generated VDF: {vdf_path}")
 
         # 1. Upload the build
-        cmd_upload = [STEAMCMD_PATH, "+login", steam["username"], f"+run_app_build {vdf_path}", "+quit"]
+        cmd_upload = [steamcmd, "+login", steam["username"], f"+run_app_build {vdf_path}", "+quit"]
         print(f"Uploading {os_name}...")
         run(cmd_upload, interactive=True)
 
         # 2. Assign to Default Branch
         # This command sets the MOST RECENTLY UPLOADED build for this depot to the specified branch
         print(f"Assigning latest build to branch 'public'...")
-        cmd_branch = [STEAMCMD_PATH, "+login", steam["username"], "+set_default_branch public", "+quit"]
+        cmd_branch = [steamcmd, "+login", steam["username"], "+set_default_branch public", "+quit"]
         run(cmd_branch, interactive=True)
 
     # Final Step: Open the Steamworks Depots page for you to activate
@@ -261,7 +340,6 @@ def deploy_steam(label, steam, export_paths, root):
 
     url = f"https://partner.steamgames.com/apps/builds/{steam['app_id']}/depots"
     try:
-        import webbrowser
         webbrowser.open(url)
         print(f"Opened: {url}")
         print("Click 'Set as Default' for the latest build in the list.")
@@ -270,10 +348,10 @@ def deploy_steam(label, steam, export_paths, root):
         print(f"Go to: {url} manually.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Build a Godot 4 game and deploy it to Itch.io and Steam.")
-    parser.add_argument("--demo-only", action="store_true", help="only build and upload the Steam demo")
-    parser.add_argument("--no-demo", action="store_true", help="leave the Steam demo alone this run")
-    parser.add_argument("--skip-demo-check", action="store_true", help="upload the demo even if its contents can't be verified")
+    parser = argparse.ArgumentParser(description="Build a Godot 4 game, deploy it to Itch.io and Steam, and package it for Patreon and SubscribeStar.")
+    parser.add_argument("--demo-only", action="store_true", help="only build and upload the demo")
+    parser.add_argument("--no-demo", action="store_true", help="leave the demo alone this run")
+    parser.add_argument("--skip-demo-check", action="store_true", help="upload even if a build's contents can't be verified")
     args = parser.parse_args()
     root = Path.cwd()
 
@@ -288,7 +366,7 @@ def main():
     # Work out where we can deploy, and fail early (before touching the project) if we can't
     targets, skipped = resolve_targets(cfg)
     for name in list(targets):
-        flag = "--no-demo" if args.no_demo and name == "Steam Demo" else "--demo-only" if args.demo_only and name != "Steam Demo" else None
+        flag = "--no-demo" if args.no_demo and name in DEMO_TARGETS else "--demo-only" if args.demo_only and name not in DEMO_TARGETS else None
         if flag: del targets[name]; skipped[name] = f"you passed {flag}"
     if not targets:
         print(f"ERROR: No deploy targets configured in {LOCAL_CFG}. Nothing to do.")
@@ -296,10 +374,14 @@ def main():
         sys.exit(1)
 
     butler_path = shutil.which("butler")
-    if "Itch" in targets and not butler_path:
+    if any(t.startswith("Itch") for t in targets) and not butler_path:
         print("ERROR: Itch is configured but 'butler' was not found on PATH."); sys.exit(1)
-    if any(t.startswith("Steam") for t in targets) and not Path(STEAMCMD_PATH).exists():
-        print(f"ERROR: Steam is configured but SteamCMD was not found at {STEAMCMD_PATH}."); sys.exit(1)
+    steamcmd = steamcmd_path(cfg)
+    if any(t.startswith("Steam") for t in targets) and not Path(steamcmd).exists():
+        print(f"ERROR: Steam is configured but SteamCMD was not found at {steamcmd} (set steamcmd_path)."); sys.exit(1)
+    godot_cmd = godot_command(cfg)
+    if not godot_cmd:
+        print("ERROR: Godot wasn't found. Set godot_path in game_config.json (or $GODOT), or put godot on PATH."); sys.exit(1)
 
     # 2. Build Prep
     version = datetime.now().strftime(VERSION_FMT)
@@ -308,20 +390,21 @@ def main():
     proj = root / "project.godot"
     if not proj.exists(): print(f"ERROR: {proj} not found. Run this from a Godot project folder."); sys.exit(1)
 
-    full_presets = PRESETS if "Itch" in targets or "Steam" in targets else []
+    run_pre_export(cfg, godot_cmd, root)
+
+    full_presets = PRESETS if any(t in targets for t in ["Itch", "Steam", "Patreon", "SubscribeStar"]) else []
     demo_presets = list(targets["Steam Demo"]["depots"]) if "Steam Demo" in targets else []
+    if "Itch Demo" in targets: demo_presets += [p for p in DEMO_PRESETS.values() if p not in demo_presets]
     presets = read_presets(root)
     export_paths = get_export_paths(root, presets, full_presets + demo_presets)
 
-    withheld, dangling = {}, {}
-    if demo_presets:
-        files = project_files(root)
-        errors, withheld = check_demo(root, presets, demo_presets, export_paths, files)
-        if errors:
-            print("\nERROR: The demo can't be built safely:")
-            for e in errors: print(f"  -> {e}")
-            print("Fix the above, or pass --no-demo to deploy everything else."); sys.exit(1)
-        dangling = {name: find_dangling_refs(root, files, w) for name, w in withheld.items()}
+    files = project_files(root)
+    errors, withheld = check_withheld(root, presets, full_presets + demo_presets, demo_presets, export_paths, files)
+    if errors:
+        print("\nERROR: The builds can't be made safely:")
+        for e in errors: print(f"  -> {e}")
+        print("Fix the above, or pass --no-demo to deploy everything else."); sys.exit(1)
+    dangling = {name: find_dangling_refs(root, files, w) for name, w in withheld.items()}
     for p in export_paths.values(): Path(p).parent.mkdir(parents=True, exist_ok=True)
 
     # 3. Plan
@@ -331,18 +414,24 @@ def main():
     print(f"Build: {', '.join(export_paths)}")
     for name, p in export_paths.items(): print(f"  -> {name}: {p}")
     print(f"Deploy: {', '.join(targets)}")
-    if "Itch" in targets: print(f"  -> Itch: {targets['Itch']['target']}")
+    if "Itch" in targets: print(f"  -> Itch: {targets['Itch']['target']} (windows, linux)")
+    if "Itch Demo" in targets:
+        print(f"  -> Itch Demo: {targets['Itch Demo']['target']} (windows-demo, linux-demo)")
+        print(f"     Once, on itch: Edit game > Uploads, mark the two -demo uploads as demos so they're free on the paid page.")
+    for label in ["Patreon", "SubscribeStar"]:
+        if label in targets: print(f"  -> {label}: the full game zipped into builds/release/, then {targets[label]['url']} opened to post them")
     for label in ["Steam", "Steam Demo"]:
         if label not in targets: continue
         steam = targets[label]
         print(f"  -> {label}: App {steam['app_id']} ({', '.join(f'{p} depot {d}' for p, d in steam['depots'].items())})")
         for p, reason in steam["skipped_depots"].items(): print(f"     !! {p} depot SKIPPED: {reason}")
-    for name in demo_presets:
+    for name in withheld:
         print(f"     {name} withholds {len(withheld[name])} of {len(files)} project files")
-        if "demo" not in presets[name].get("custom_features", ""):
+        if name in demo_presets and "demo" not in presets[name].get("custom_features", ""):
             print(f"     !! {name} has no 'demo' custom feature, so the game can't tell it's the demo via OS.has_feature(\"demo\")")
-        if dangling[name] and dangling[name] == dangling.get(demo_presets[0]) and name != demo_presets[0]:
-            print(f"     !! (same {len(dangling[name])} dangling references as {demo_presets[0]})"); continue
+        first = next(n for n in withheld if dangling[n] == dangling[name])
+        if dangling[name] and first != name:
+            print(f"     !! (same {len(dangling[name])} dangling references as {first})"); continue
         if dangling[name]:
             print(f"     !! {len(dangling[name])} shipped files still reference withheld files. Scenes/resources among them will FAIL TO LOAD")
             print(f"        in the demo, scripts need a guard, and every name on the right is visible to dataminers:")
@@ -366,38 +455,43 @@ def main():
 
     print("\n--- BUILDING ---")
     build_start = time.time() - 2  # slack for coarse filesystem timestamps
-    godot_cmd = ["flatpak", "run", GODOT_ID]
     for preset, out in export_paths.items():
         run(godot_cmd + ["--headless", "--quit", "--export-release", preset, out])
-        if not Path(out).exists(): print(f"FAIL: {out} not created"); sys.exit(1)
+        if not Path(out).exists():
+            print(f"FAIL: {out} not created. No export templates for this Godot? Editor > Manage Export Templates."); sys.exit(1)
     print("Builds complete.")
 
-    # Nothing gets uploaded anywhere until the demo is known to be clean
-    if demo_presets:
-        print("\n--- VERIFYING DEMO ---")
-        problems = {name: verify_demo_build(name, export_paths[name], withheld[name], build_start) for name in demo_presets}
-        for name, found in problems.items():
-            for problem in found: print(f"  !! {name}: {problem}")
-        if any(problems.values()):
-            if not args.skip_demo_check: print("ERROR: Refusing to upload anything. Fix the above (or pass --skip-demo-check if you're sure)."); sys.exit(1)
-            print("WARNING: Continuing anyway because of --skip-demo-check.")
+    # Nothing gets uploaded anywhere until every build is known to be clean
+    print("\n--- VERIFYING BUILDS ---")
+    problems = {name: verify_build(name, out, withheld.get(name, set()), build_start) for name, out in export_paths.items()}
+    for name, found in problems.items():
+        for problem in found: print(f"  !! {name}: {problem}")
+    if any(problems.values()):
+        if not args.skip_demo_check: print("ERROR: Refusing to upload anything. Fix the above (or pass --skip-demo-check if you're sure)."); sys.exit(1)
+        print("WARNING: Continuing anyway because of --skip-demo-check.")
 
-    # 5. Deploy Itch
-    if "Itch" in targets:
-        print("\n--- DEPLOYING TO ITCH ---")
-        target = targets["Itch"]["target"]
-
-        for preset in PRESETS:
-            p = Path(export_paths[preset])
-            if p.exists():
-                run([butler_path, "push", str(p), f"{target}:{'windows' if preset=='Windows' else 'linux'}", f"--userversion={version}"])
-    elif "Itch" in skipped:
-        print(f"\n--- SKIPPING ITCH ({skipped['Itch']}) ---")
+    # 5. Deploy Itch: the full game, then the demo on channels of its own on the same page. Each build's whole
+    # folder, so one that keeps its .pck beside the executable goes up whole.
+    for label in ["Itch", "Itch Demo"]:
+        if label in targets:
+            print(f"\n--- DEPLOYING TO {label.upper()} ---")
+            for preset in (PRESETS if label == "Itch" else list(DEMO_PRESETS.values())):
+                if preset in export_paths and Path(export_paths[preset]).exists():
+                    folder = Path(export_paths[preset]).parent
+                    run([butler_path, "push", str(folder), f"{targets[label]['target']}:{ITCH_CHANNELS[preset]}", f"--userversion={version}"])
+        elif label in skipped:
+            print(f"\n--- SKIPPING {label.upper()} ({skipped[label]}) ---")
 
     # 6. Deploy Steam (full game, then demo)
     for label in ["Steam", "Steam Demo"]:
-        if label in targets: deploy_steam(label, targets[label], export_paths, root)
+        if label in targets: deploy_steam(label, targets[label], export_paths, root, steamcmd)
         elif label in skipped: print(f"\n--- SKIPPING {label.upper()} ({skipped[label]}) ---")
+
+    # 7. Patreon and SubscribeStar: the full game zipped, and the pages opened to post it
+    by_hand = [label for label in ["Patreon", "SubscribeStar"] if label in targets]
+    if by_hand:
+        zips = package_zips(cfg, root, version, export_paths)
+        for label in by_hand: deploy_by_hand(label, targets[label]["url"], zips)
 
     print("\n=== DONE ===")
     print(f"Deployed {version} to: {', '.join(targets)}")
