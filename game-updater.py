@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Game Updater: Build & Deploy for Godot 4, from Linux or Windows.
-Supports Itch.io and Steam, plus a cut-down demo (on Steam, or on the same itch page),
-and packages the full game for Patreon and SubscribeStar.
+Supports Itch.io and Steam, plus a cut-down demo (on Steam, or on the same itch page, and in the browser
+there too), and packages the full game for Patreon and SubscribeStar.
 """
 
 import os, sys, json, subprocess, shutil, re, struct, time, argparse, shlex, webbrowser
@@ -15,6 +15,7 @@ LOCAL_CFG = "game_config.json"
 GODOT_ID = "org.godotengine.Godot"
 PRESETS = ["Windows", "Linux"]
 DEMO_PRESETS = {p: f"{p} Demo" for p in PRESETS}  # export presets the demo is built from
+WEB_DEMO_PRESET = "Web Demo"  # the demo for the browser, on itch
 VERSION_FMT = "%Y.%m.%d.%H"
 TEMPLATE = {
     "itch_username": "USER", "itch_project_slug": "SLUG",
@@ -22,11 +23,12 @@ TEMPLATE = {
     "steam_demo_app_id": "DEMO_APP", "steam_demo_windows_depot_id": "DEMO_WIN_DEPOT", "steam_demo_linux_depot_id": "DEMO_LNX_DEPOT",
 }
 # Optional keys: not in the template a new project gets, read when present (see the README).
-OPTIONAL = ["godot_path", "steamcmd_path", "pre_export", "itch_demo", "patreon_post_url", "subscribestar_post_url", "release_name"]
+OPTIONAL = ["godot_path", "steamcmd_path", "pre_export", "itch_demo", "itch_web_demo", "patreon_post_url", "subscribestar_post_url", "release_name"]
 TEXT_EXTS = (".tscn", ".tres", ".gd", ".gdshader", ".gdshaderinc", ".cfg", ".json", ".godot")
 WINDOWS = os.name == "nt"
-DEMO_TARGETS = ("Steam Demo", "Itch Demo")
-ITCH_CHANNELS = {"Windows": "windows", "Linux": "linux", "Windows Demo": "windows-demo", "Linux Demo": "linux-demo"}
+DEMO_TARGETS = ("Steam Demo", "Itch Demo", "Itch Web Demo")
+ITCH_CHANNELS = {"Windows": "windows", "Linux": "linux", "Windows Demo": "windows-demo", "Linux Demo": "linux-demo", WEB_DEMO_PRESET: "web-demo"}
+ITCH_PRESETS = {"Itch": PRESETS, "Itch Demo": list(DEMO_PRESETS.values()), "Itch Web Demo": [WEB_DEMO_PRESET]}
 
 def cfg_value(cfg, key):
     """Usable value for key, or None if it is missing, empty, or still the template placeholder. A value given per
@@ -76,6 +78,8 @@ def resolve_targets(cfg):
 
     # The demo on the same itch page as the full game, on channels of its own
     if "Itch" in targets and cfg.get("itch_demo"): targets["Itch Demo"] = {"target": targets["Itch"]["target"]}
+    # And in the browser, from the Web Demo preset
+    if "Itch" in targets and cfg.get("itch_web_demo"): targets["Itch Web Demo"] = {"target": targets["Itch"]["target"]}
 
     # Patreon and SubscribeStar take the full game as zips, posted by hand: neither has an API to upload with
     for name, key in [("Patreon", "patreon_post_url"), ("SubscribeStar", "subscribestar_post_url")]:
@@ -395,6 +399,7 @@ def main():
     full_presets = PRESETS if any(t in targets for t in ["Itch", "Steam", "Patreon", "SubscribeStar"]) else []
     demo_presets = list(targets["Steam Demo"]["depots"]) if "Steam Demo" in targets else []
     if "Itch Demo" in targets: demo_presets += [p for p in DEMO_PRESETS.values() if p not in demo_presets]
+    if "Itch Web Demo" in targets: demo_presets.append(WEB_DEMO_PRESET)
     presets = read_presets(root)
     export_paths = get_export_paths(root, presets, full_presets + demo_presets)
 
@@ -418,6 +423,9 @@ def main():
     if "Itch Demo" in targets:
         print(f"  -> Itch Demo: {targets['Itch Demo']['target']} (windows-demo, linux-demo)")
         print(f"     Once, on itch: Edit game > Uploads, mark the two -demo uploads as demos so they're free on the paid page.")
+    if "Itch Web Demo" in targets:
+        print(f"  -> Itch Web Demo: {targets['Itch Web Demo']['target']} (web-demo)")
+        print(f"     Once, on itch: tick 'This file will be played in the browser' on the web-demo upload, and mark it a demo.")
     for label in ["Patreon", "SubscribeStar"]:
         if label in targets: print(f"  -> {label}: the full game zipped into builds/release/, then {targets[label]['url']} opened to post them")
     for label in ["Steam", "Steam Demo"]:
@@ -472,10 +480,10 @@ def main():
 
     # 5. Deploy Itch: the full game, then the demo on channels of its own on the same page. Each build's whole
     # folder, so one that keeps its .pck beside the executable goes up whole.
-    for label in ["Itch", "Itch Demo"]:
+    for label in ["Itch", "Itch Demo", "Itch Web Demo"]:
         if label in targets:
             print(f"\n--- DEPLOYING TO {label.upper()} ---")
-            for preset in (PRESETS if label == "Itch" else list(DEMO_PRESETS.values())):
+            for preset in ITCH_PRESETS[label]:
                 if preset in export_paths and Path(export_paths[preset]).exists():
                     folder = Path(export_paths[preset]).parent
                     run([butler_path, "push", str(folder), f"{targets[label]['target']}:{ITCH_CHANNELS[preset]}", f"--userversion={version}"])

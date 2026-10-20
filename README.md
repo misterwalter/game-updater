@@ -54,7 +54,7 @@ An empty value falls back to the defaults. Exporting needs Godot's export templa
 
 ## The demo on the same itch page
 
-`"itch_demo": true` builds the `Windows Demo` and `Linux Demo` presets too and pushes them to the same itch page, on the `windows-demo` and `linux-demo` channels, beside the full game's `windows` and `linux`. Once, on itch (Edit game > Uploads), mark the two demo uploads as demos so they can be downloaded without buying. Every build is checked after exporting: any preset with an exclude filter has its PCK opened, and nothing is uploaded anywhere if a withheld file is inside, or a build folder has files the build didn't make (itch, like Steam, gets each build's whole folder).
+`"itch_demo": true` builds the `Windows Demo` and `Linux Demo` presets too and pushes them to the same itch page, on the `windows-demo` and `linux-demo` channels, beside the full game's `windows` and `linux`. Once, on itch (Edit game > Uploads), mark the two demo uploads as demos so they can be downloaded without buying. `"itch_web_demo": true` also builds a `Web Demo` preset (export path e.g. `builds/demo/web/index.html`) and pushes it to the `web-demo` channel; once, tick 'This file will be played in the browser' on that upload and mark it a demo. Every build is checked after exporting: any preset with an exclude filter has its PCK opened, and nothing is uploaded anywhere if a withheld file is inside, or a build folder has files the build didn't make (itch, like Steam, gets each build's whole folder).
 
 ## Patreon and SubscribeStar
 
