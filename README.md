@@ -56,6 +56,10 @@ An empty value falls back to the defaults. Exporting needs Godot's export templa
 
 `"itch_demo": true` builds the `Windows Demo` and `Linux Demo` presets too and pushes them to the same itch page, on the `windows-demo` and `linux-demo` channels, beside the full game's `windows` and `linux`. Once, on itch (Edit game > Uploads), mark the two demo uploads as demos so they can be downloaded without buying. `"itch_web_demo": true` also builds a `Web Demo` preset (export path e.g. `builds/demo/web/index.html`) and pushes it to the `web-demo` channel; once, tick 'This file will be played in the browser' on that upload and mark it a demo. Every build is checked after exporting: any preset with an exclude filter has its PCK opened, and nothing is uploaded anywhere if a withheld file is inside, or a build folder has files the build didn't make (itch, like Steam, gets each build's whole folder).
 
+## Smoke tests
+
+Give `smoke_args` (e.g. `["--", "--smoke"]`, for a game that has a self-test behind that) and each build that can run on this machine (the Windows ones on Windows, the Linux ones on Linux) is run headless from a copy, with its log kept, after building and before anything is uploaded. A build that exits non-zero, runs past `smoke_timeout` seconds (900 by default), or logs an `ERROR:` or `SCRIPT ERROR:` line stops everything. `smoke_ignore` is a list of regexes for log lines that are not to count.
+
 ## Patreon and SubscribeStar
 
 Neither has an API to upload a file or make a post with, so these are by hand, made quick: give `patreon_post_url` and/or `subscribestar_post_url` (the page you post from), and after the other uploads the full game's builds are zipped into `builds/release/` (`<name>-<version>-windows.zip`, `-linux.zip`; `release_name` sets the name, the project's name otherwise) and the pages are opened in your browser for you to attach them to a post.

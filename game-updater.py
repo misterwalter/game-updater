@@ -5,7 +5,7 @@ Supports Itch.io and Steam, plus a cut-down demo (on Steam, or on the same itch 
 there too), and packages the full game for Patreon and SubscribeStar.
 """
 
-import os, sys, json, subprocess, shutil, re, struct, time, argparse, shlex, webbrowser
+import os, sys, json, subprocess, shutil, re, struct, time, argparse, shlex, webbrowser, tempfile
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -23,7 +23,8 @@ TEMPLATE = {
     "steam_demo_app_id": "DEMO_APP", "steam_demo_windows_depot_id": "DEMO_WIN_DEPOT", "steam_demo_linux_depot_id": "DEMO_LNX_DEPOT",
 }
 # Optional keys: not in the template a new project gets, read when present (see the README).
-OPTIONAL = ["godot_path", "steamcmd_path", "pre_export", "itch_demo", "itch_web_demo", "patreon_post_url", "subscribestar_post_url", "release_name"]
+OPTIONAL = ["godot_path", "steamcmd_path", "pre_export", "itch_demo", "itch_web_demo", "patreon_post_url", "subscribestar_post_url", "release_name",
+            "smoke_args", "smoke_timeout", "smoke_ignore"]
 TEXT_EXTS = (".tscn", ".tres", ".gd", ".gdshader", ".gdshaderinc", ".cfg", ".json", ".godot")
 WINDOWS = os.name == "nt"
 DEMO_TARGETS = ("Steam Demo", "Itch Demo", "Itch Web Demo")
@@ -256,6 +257,34 @@ def verify_build(name, export_path, withheld, build_start):
     if not problems: print(f"  -> {name}: OK. {len(shipped)} files in the PCK, none of the {len(withheld)} withheld files among them.")
     return problems
 
+def smoke_test(cfg, name, export_path):
+    """Run a build that can run here with smoke_args (the game's own self-test), from a copy so nothing it writes
+    lands in what is uploaded. Returns reasons it must not be uploaded: it failed, hung, or logged an error."""
+    args = cfg.get("smoke_args")
+    exe = Path(export_path)
+    runs_here = exe.suffix == ".exe" if WINDOWS else exe.suffix in (".x86_64", ".arm64", ".x86_32")
+    if not args or not runs_here: return []
+    timeout = int(cfg.get("smoke_timeout") or 900)
+    ignore = [re.compile(p) for p in cfg.get("smoke_ignore", [])]
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / "build"
+        shutil.copytree(exe.parent, copy)
+        log = Path(tmp) / "smoke.log"
+        cmd = [str(copy / exe.name), "--headless", "--log-file", str(log)] + list(args)
+        print(f"> {name}: {' '.join(cmd[1:])}")
+        try:
+            code = subprocess.run(cmd, cwd=copy, timeout=timeout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        except subprocess.TimeoutExpired:
+            return [f"the smoke test ran past {timeout} s (smoke_timeout): it hung, or wants longer"]
+        text = log.read_text(errors="ignore") if log.exists() else ""
+    errors = [l for l in text.splitlines() if l.startswith(("ERROR:", "SCRIPT ERROR:", "USER SCRIPT ERROR:", "USER ERROR:"))
+              and not any(i.search(l) for i in ignore)]
+    problems = []
+    if code != 0: problems.append(f"the smoke test exited with {code}")
+    if errors: problems.append(f"the smoke test logged {len(errors)} errors, first: {errors[0]}")
+    if not problems: print(f"  -> {name}: smoke test passed.")
+    return problems
+
 # --- Deploy ---
 
 def package_zips(cfg, root, version, export_paths):
@@ -472,6 +501,9 @@ def main():
     # Nothing gets uploaded anywhere until every build is known to be clean
     print("\n--- VERIFYING BUILDS ---")
     problems = {name: verify_build(name, out, withheld.get(name, set()), build_start) for name, out in export_paths.items()}
+    if cfg.get("smoke_args"):
+        print("\n--- SMOKE TESTS ---")
+        for name, out in export_paths.items(): problems[name] += smoke_test(cfg, name, out)
     for name, found in problems.items():
         for problem in found: print(f"  !! {name}: {problem}")
     if any(problems.values()):
